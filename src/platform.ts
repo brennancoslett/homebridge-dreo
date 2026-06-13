@@ -4,6 +4,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import { FanAccessory } from './accessories/FanAccessory';
 import { HeaterAccessory } from './accessories/HeaterAccessory';
 import { HumidifierAccessory } from './accessories/HumidifierAccessory';
+import { BaseAccessory } from './accessories/BaseAccessory';
 import DreoAPI from './DreoAPI';
 
 /**
@@ -18,6 +19,7 @@ export class DreoPlatform implements DynamicPlatformPlugin {
 
   // This is used to track restored cached accessories
   public readonly accessories: PlatformAccessory[] = [];
+  private readonly accessoryHandlers: BaseAccessory[] = [];
 
   constructor(
     public readonly log: Logger,
@@ -111,6 +113,12 @@ export class DreoPlatform implements DynamicPlatformPlugin {
     // Open WebSocket (used to control devices later)
     await this.webHelper.startWebSocket();
 
+    // Listen for WebSocket reconnection to refresh device states
+    this.webHelper.addEventListener('open', async () => {
+      this.log.info('WebSocket connected/reconnected. Refreshing device states...');
+      await this.refreshDeviceStates();
+    });
+
     // Loop over the discovered devices and register each one if it has not already been registered
     for (const device of dreoDevices) {
       // Print device info:
@@ -167,6 +175,8 @@ export class DreoPlatform implements DynamicPlatformPlugin {
       // Find the matching prefix
       let modelPrefix = SUPPORTED_MODEL_PREFIXES.find(prefix => device.model.startsWith(prefix));
 
+      let handler: BaseAccessory | undefined = undefined;
+
       // Determine device type based on the matched prefix
       switch (modelPrefix) {
         case 'DR-HTF':
@@ -176,14 +186,14 @@ export class DreoPlatform implements DynamicPlatformPlugin {
         case 'DR-HAP':
           // Tower Fan, Air Circulator, Ceiling Fan, Air Purifier
           accessory.category = this.api.hap.Categories.FAN;
-          new FanAccessory(this, accessory, state);
+          handler = new FanAccessory(this, accessory, state);
           break;
 
         case 'DR-HSH':
         case 'WH':
           // Heater
           accessory.category = this.api.hap.Categories.AIR_HEATER;
-          new HeaterAccessory(this, accessory, state);
+          handler = new HeaterAccessory(this, accessory, state);
           break;
         case 'DR-HAC':
           // Air Conditioner
@@ -195,16 +205,37 @@ export class DreoPlatform implements DynamicPlatformPlugin {
         case 'DR-HHM':
           // Humidifier
           accessory.category = this.api.hap.Categories.AIR_HUMIDIFIER;
-          new HumidifierAccessory(this, accessory, state);
+          handler = new HumidifierAccessory(this, accessory, state);
           break;
 
         default:
           this.log.error('Error, unknown device type:', device.productName, device.model);
       }
 
+      if (handler) {
+        this.accessoryHandlers.push(handler);
+      }
+
       if (!existingAccessory && modelPrefix) {
         // Link accessory to the platform if model is supported
         this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      }
+    }
+  }
+
+  async refreshDeviceStates() {
+    this.log.debug('Refreshing state of all accessories...');
+    for (const handler of this.accessoryHandlers) {
+      try {
+        const state = await this.webHelper.getState(handler.sn);
+        if (state !== undefined) {
+          handler.updateState(state);
+          this.log.debug(`Successfully refreshed state for ${handler.accessory.displayName}`);
+        } else {
+          this.log.warn(`Could not refresh state for ${handler.accessory.displayName} (response undefined)`);
+        }
+      } catch (error) {
+        this.log.error(`Failed to refresh state for ${handler.accessory.displayName}:`, error);
       }
     }
   }

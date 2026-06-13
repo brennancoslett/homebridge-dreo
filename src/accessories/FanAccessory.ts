@@ -354,13 +354,12 @@ export class FanAccessory extends BaseAccessory {
   // Handle requests to set the "Active" characteristic
   setActive(value) {
     this.platform.log.debug('Triggered SET Active:', value);
-    // Check state to prevent duplicate requests
-    if (this.currState.on !== Boolean(value)) {
-      // Send to Dreo server via websocket
-      this.platform.webHelper.control(this.sn, {
-        [this.currState.powerCMD]: Boolean(value),
-      });
-    }
+    const isActive = Boolean(value);
+    this.currState.on = isActive;
+    // Send to Dreo server via websocket
+    this.platform.webHelper.control(this.sn, {
+      [this.currState.powerCMD]: isActive,
+    });
   }
 
   // Handle requests to get the current value of the "Active" characteristic
@@ -375,6 +374,8 @@ export class FanAccessory extends BaseAccessory {
     // Avoid setting speed to 0 (illegal value)
     if (converted !== 0) {
       this.platform.log.debug('Setting fan speed:', converted);
+      this.currState.on = true;
+      this.currState.speed = value;
       // Setting power state to true ensures the fan is actually on
       this.platform.webHelper.control(this.sn, {
         [this.currState.powerCMD]: true,
@@ -389,6 +390,7 @@ export class FanAccessory extends BaseAccessory {
 
   // Turn oscillation on/off
   async setSwingMode(value) {
+    this.currState.swing = Boolean(value);
     this.platform.webHelper.control(this.sn, {
       [this.currState.swingCMD]:
         this.currState.swingCMD === 'oscmode' ? Number(value) : Boolean(value),
@@ -401,6 +403,7 @@ export class FanAccessory extends BaseAccessory {
 
   // Set fan mode
   async setMode(value) {
+    this.currState.autoMode = value === this.platform.Characteristic.TargetFanState.AUTO;
     this.platform.webHelper.control(this.sn, {
       mode: value === this.platform.Characteristic.TargetFanState.AUTO ? 4 : 1,
     });
@@ -412,6 +415,7 @@ export class FanAccessory extends BaseAccessory {
 
   // Turn child lock on/off
   async setLockPhysicalControls(value) {
+    this.currState.lockPhysicalControls = Boolean(value);
     this.platform.webHelper.control(this.sn, { childlockon: Number(value) });
   }
 
@@ -436,6 +440,7 @@ export class FanAccessory extends BaseAccessory {
 
   setLightOn(value: any) {
     this.platform.log.debug('Triggered SET Light On:', value);
+    this.currState.lightOn = Boolean(value);
     this.platform.webHelper.control(this.sn, { lighton: Boolean(value) });
   }
 
@@ -445,10 +450,79 @@ export class FanAccessory extends BaseAccessory {
 
   setBrightness(value) {
     this.platform.log.debug('Triggered SET Brightness:', value);
+    this.currState.brightness = value;
     this.platform.webHelper.control(this.sn, { brightness: value });
   }
 
   getBrightness() {
     return this.currState.brightness;
+  }
+
+  updateState(state) {
+    this.platform.log.debug('Updating state from API for %s', this.accessory.displayName);
+    if (!state) {
+      return;
+    }
+
+    if (state.windlevel !== undefined) {
+      this.currState.speed =
+        (state.windlevel.state * 100) / this.currState.maxSpeed;
+      this.service
+        .getCharacteristic(this.platform.Characteristic.RotationSpeed)
+        .updateValue(this.currState.speed);
+    }
+    if (state.fanon !== undefined) {
+      this.currState.on = state.fanon.state;
+      this.service
+        .getCharacteristic(this.platform.Characteristic.Active)
+        .updateValue(this.currState.on);
+    } else if (state.poweron !== undefined) {
+      this.currState.on = state.poweron.state;
+      this.service
+        .getCharacteristic(this.platform.Characteristic.Active)
+        .updateValue(this.currState.on);
+    }
+    if (this.currState.swingCMD !== 'none' && state[this.currState.swingCMD] !== undefined) {
+      this.currState.swing = Boolean(state[this.currState.swingCMD]?.state ?? false);
+      this.service
+        .getCharacteristic(this.platform.Characteristic.SwingMode)
+        .updateValue(this.currState.swing);
+    }
+    if (state.mode !== undefined) {
+      this.currState.autoMode = this.convertModeToBoolean(state.mode.state);
+      this.service
+        .getCharacteristic(this.platform.Characteristic.TargetFanState)
+        .updateValue(this.currState.autoMode);
+    }
+    if (state.childlockon !== undefined) {
+      this.currState.lockPhysicalControls = Boolean(state.childlockon.state);
+      this.service
+        .getCharacteristic(this.platform.Characteristic.LockPhysicalControls)
+        .updateValue(this.currState.lockPhysicalControls);
+    }
+    const shouldHideTemperatureSensor =
+      this.platform.config.hideTemperatureSensor || false;
+    if (state.temperature !== undefined && !shouldHideTemperatureSensor) {
+      this.currState.temperature = this.correctedTemperature(
+        state.temperature.state,
+      );
+      if (this.temperatureService) {
+        this.temperatureService
+          .getCharacteristic(this.platform.Characteristic.CurrentTemperature)
+          .updateValue(this.currState.temperature);
+      }
+    }
+    if (state.lighton !== undefined && state.brightness !== undefined) {
+      this.currState.lightOn = state.lighton.state;
+      this.currState.brightness = state.brightness.state;
+      if (this.lightService) {
+        this.lightService
+          .getCharacteristic(this.platform.Characteristic.On)
+          .updateValue(this.currState.lightOn);
+        this.lightService
+          .getCharacteristic(this.platform.Characteristic.Brightness)
+          .updateValue(this.currState.brightness);
+      }
+    }
   }
 }
