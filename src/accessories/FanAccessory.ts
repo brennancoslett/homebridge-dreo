@@ -31,6 +31,11 @@ export class FanAccessory extends BaseAccessory {
   private service: Service;
   private temperatureService?: Service;
   private lightService?: Service;
+  private reverseService?: Service;
+
+  // On DR-HCF ceiling fans the 'mode' state selects blade direction (4 = reverse),
+  // not auto/manual, so mode is exposed as a Reverse switch instead of TargetFanState
+  private readonly isCeilingFan = this.accessory.context.device.model.startsWith('DR-HCF');
 
   // The Dreo server acks every command (control-reply) even when the device drops it,
   // so track the last windlevel the device itself confirmed (control-report/report)
@@ -58,6 +63,7 @@ export class FanAccessory extends BaseAccessory {
     temperature: 0,
     lightOn: false,
     brightness: 100,
+    reverse: false,
   };
 
   constructor(
@@ -144,14 +150,26 @@ export class FanAccessory extends BaseAccessory {
       this.currState.swing = Boolean(state[this.currState.swingCMD]?.state ?? false);
     }
 
-    // Check if mode control is supported
-    if (state.mode !== undefined) {
+    // Check if mode control is supported. Ceiling fans use 'mode' for blade
+    // direction (handled via the Reverse switch below), so exposing TargetFanState
+    // there would let HomeKit scenes send conflicting mode commands (and "Auto"
+    // would reverse the fan)
+    if (state.mode !== undefined && !this.isCeilingFan) {
       // Register handlers for Target Fan State
       this.service
         .getCharacteristic(this.platform.Characteristic.TargetFanState)
         .onSet(this.setMode.bind(this))
         .onGet(this.getMode.bind(this));
       this.currState.autoMode = this.convertModeToBoolean(state.mode.state);
+    } else if (
+      this.isCeilingFan &&
+      this.service.testCharacteristic(this.platform.Characteristic.TargetFanState)
+    ) {
+      // Remove TargetFanState left over from previous versions so cached
+      // accessories/scenes stop writing it
+      this.service.removeCharacteristic(
+        this.service.getCharacteristic(this.platform.Characteristic.TargetFanState),
+      );
     }
 
     // Check if child lock is supported
@@ -162,6 +180,27 @@ export class FanAccessory extends BaseAccessory {
         .onSet(this.setLockPhysicalControls.bind(this))
         .onGet(this.getLockPhysicalControls.bind(this));
       this.currState.lockPhysicalControls = Boolean(state.childlockon.state);
+    }
+
+    // Check if this is a ceiling fan with reverse mode support
+    if (this.isCeilingFan && state.mode !== undefined) {
+      // For ceiling fans, mode 4 is reverse mode
+      this.currState.reverse = state.mode.state === 4;
+
+      // Add a separate Switch service for reverse control
+      this.reverseService =
+        this.accessory.getService('Reverse') ||
+        this.accessory.addService(this.platform.Service.Switch, 'Reverse', 'Reverse');
+
+      this.reverseService.setCharacteristic(
+        this.platform.Characteristic.Name,
+        accessory.context.device.deviceName + ' Reverse',
+      );
+
+      this.reverseService
+        .getCharacteristic(this.platform.Characteristic.On)
+        .onSet(this.setReverse.bind(this))
+        .onGet(this.getReverse.bind(this));
     }
 
     const shouldHideTemperatureSensor =
@@ -298,14 +337,24 @@ export class FanAccessory extends BaseAccessory {
                 );
                 break;
               case 'mode':
-                this.currState.autoMode = this.convertModeToBoolean(
-                  data.reported.mode,
-                );
-                this.service
-                  .getCharacteristic(
-                    this.platform.Characteristic.TargetFanState,
-                  )
-                  .updateValue(this.currState.autoMode);
+                if (this.isCeilingFan) {
+                  // For ceiling fans, mode 4 is reverse
+                  this.currState.reverse = data.reported.mode === 4;
+                  // Update reverse switch service
+                  this.reverseService
+                    ?.getCharacteristic(this.platform.Characteristic.On)
+                    .updateValue(this.currState.reverse);
+                } else {
+                  // For regular fans, mode 4 is auto mode
+                  this.currState.autoMode = this.convertModeToBoolean(
+                    data.reported.mode,
+                  );
+                  this.service
+                    .getCharacteristic(
+                      this.platform.Characteristic.TargetFanState,
+                    )
+                    .updateValue(this.currState.autoMode);
+                }
                 this.platform.log.debug('Fan mode:', data.reported.mode);
                 break;
               case 'childlockon':
@@ -519,6 +568,24 @@ export class FanAccessory extends BaseAccessory {
     return this.currState.lockPhysicalControls;
   }
 
+  // Turn reverse on/off (ceiling fans only)
+  async setReverse(value) {
+    const reverse = Boolean(value);
+    // Skip redundant writes: scenes write every characteristic they capture, and a
+    // no-op mode command sent during power-on makes the device drop the speed change
+    if (reverse === this.currState.reverse) {
+      return;
+    }
+    this.currState.reverse = reverse;
+    this.platform.webHelper.control(this.sn, {
+      mode: reverse ? 4 : 1,
+    });
+  }
+
+  getReverse() {
+    return this.currState.reverse;
+  }
+
   async getTemperature() {
     return this.currState.temperature;
   }
@@ -586,10 +653,17 @@ export class FanAccessory extends BaseAccessory {
         .updateValue(this.currState.swing);
     }
     if (state.mode !== undefined) {
-      this.currState.autoMode = this.convertModeToBoolean(state.mode.state);
-      this.service
-        .getCharacteristic(this.platform.Characteristic.TargetFanState)
-        .updateValue(this.currState.autoMode);
+      if (this.isCeilingFan) {
+        this.currState.reverse = state.mode.state === 4;
+        this.reverseService
+          ?.getCharacteristic(this.platform.Characteristic.On)
+          .updateValue(this.currState.reverse);
+      } else {
+        this.currState.autoMode = this.convertModeToBoolean(state.mode.state);
+        this.service
+          .getCharacteristic(this.platform.Characteristic.TargetFanState)
+          .updateValue(this.currState.autoMode);
+      }
     }
     if (state.childlockon !== undefined) {
       this.currState.lockPhysicalControls = Boolean(state.childlockon.state);
