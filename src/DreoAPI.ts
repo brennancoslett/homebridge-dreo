@@ -141,8 +141,14 @@ export default class DreoAPI {
       this.log.debug('WebSocket Closed');
     });
 
-    // Keep connection open by sending empty packet every 15 seconds
-    setInterval(() => this.ws.send('2'), 15000);
+    // Keep connection open by sending empty packet every 15 seconds.
+    // Only send while the socket is open — ReconnectingWebSocket queues sends
+    // made while disconnected and would flush a burst of them on reconnect.
+    setInterval(() => {
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send('2');
+      }
+    }, 15000);
   }
 
   // Allow devices to add event listeners to the WebSocket
