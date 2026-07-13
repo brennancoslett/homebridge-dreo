@@ -32,6 +32,19 @@ export class FanAccessory extends BaseAccessory {
   private temperatureService?: Service;
   private lightService?: Service;
 
+  // The Dreo server acks every command (control-reply) even when the device drops it,
+  // so track the last windlevel the device itself confirmed (control-report/report)
+  // and re-send the speed command if the device never applies it
+  private confirmedWindlevel = 0;
+  private targetWindlevel?: number;
+  private speedRetries = 0;
+  private speedVerifyTimer?: ReturnType<typeof setTimeout>;
+
+  // Timer used to suppress the bare power-on command when HomeKit writes
+  // Active and RotationSpeed together (speed commands already include power-on)
+  private pendingPowerOnTimer?: ReturnType<typeof setTimeout>;
+  private lastSpeedCommandTime = 0;
+
   // Cached copy of latest fan states
   private currState = {
     on: false,
@@ -72,6 +85,7 @@ export class FanAccessory extends BaseAccessory {
     // Load current state from Dreo API
     this.currState.speed =
       (state.windlevel.state * 100) / this.currState.maxSpeed;
+    this.confirmedWindlevel = state.windlevel.state;
     // Some fans use different commands to toggle power, determine which one should be used
     if (state.fanon !== undefined) {
       this.currState.powerCMD = 'fanon';
@@ -241,6 +255,11 @@ export class FanAccessory extends BaseAccessory {
                 this.platform.log.debug('Fan power:', data.reported.fanon);
                 break;
               case 'windlevel':
+                // control-reply is just a server ack; only control-report/report
+                // reflect what the device actually applied
+                if (data.method !== 'control-reply') {
+                  this.confirmedWindlevel = data.reported.windlevel;
+                }
                 this.currState.speed =
                   (data.reported.windlevel * 100) / this.currState.maxSpeed;
                 this.service
@@ -356,10 +375,31 @@ export class FanAccessory extends BaseAccessory {
     this.platform.log.debug('Triggered SET Active:', value);
     const isActive = Boolean(value);
     this.currState.on = isActive;
-    // Send to Dreo server via websocket
-    this.platform.webHelper.control(this.sn, {
-      [this.currState.powerCMD]: isActive,
-    });
+    if (this.pendingPowerOnTimer) {
+      clearTimeout(this.pendingPowerOnTimer);
+      this.pendingPowerOnTimer = undefined;
+    }
+    if (!isActive) {
+      // Cancel any in-flight speed verification so a retry can't turn the fan back on
+      this.cancelSpeedVerification();
+      this.platform.webHelper.control(this.sn, {
+        [this.currState.powerCMD]: false,
+      });
+      return;
+    }
+    // When HomeKit turns the fan on at a speed (scenes, slider from off) it writes
+    // Active and RotationSpeed together. The speed command already includes power-on,
+    // and racing a bare power-on against it makes the device drop the speed change.
+    // Delay briefly and skip the bare power-on if a speed command covers it.
+    this.pendingPowerOnTimer = setTimeout(() => {
+      this.pendingPowerOnTimer = undefined;
+      if (Date.now() - this.lastSpeedCommandTime < 1000) {
+        return;
+      }
+      this.platform.webHelper.control(this.sn, {
+        [this.currState.powerCMD]: true,
+      });
+    }, 150);
   }
 
   // Handle requests to get the current value of the "Active" characteristic
@@ -376,12 +416,68 @@ export class FanAccessory extends BaseAccessory {
       this.platform.log.debug('Setting fan speed:', converted);
       this.currState.on = true;
       this.currState.speed = value;
+      this.lastSpeedCommandTime = Date.now();
+      // This command supersedes any pending bare power-on
+      if (this.pendingPowerOnTimer) {
+        clearTimeout(this.pendingPowerOnTimer);
+        this.pendingPowerOnTimer = undefined;
+      }
       // Setting power state to true ensures the fan is actually on
       this.platform.webHelper.control(this.sn, {
         [this.currState.powerCMD]: true,
         windlevel: converted,
       });
+      this.scheduleSpeedVerification(converted);
     }
+  }
+
+  // The device sometimes drops the windlevel portion of a combined power-on + speed
+  // command (it acks via control-reply but never sends the control-report that
+  // accompanies a real speed change). Verify the device confirmed the speed and
+  // re-send if it didn't.
+  private scheduleSpeedVerification(windlevel: number) {
+    this.cancelSpeedVerification();
+    this.targetWindlevel = windlevel;
+    this.speedRetries = 0;
+    this.speedVerifyTimer = setTimeout(() => this.verifySpeed(), 2000);
+  }
+
+  private cancelSpeedVerification() {
+    if (this.speedVerifyTimer) {
+      clearTimeout(this.speedVerifyTimer);
+      this.speedVerifyTimer = undefined;
+    }
+    this.targetWindlevel = undefined;
+  }
+
+  private verifySpeed() {
+    this.speedVerifyTimer = undefined;
+    if (this.targetWindlevel === undefined || !this.currState.on) {
+      return;
+    }
+    if (this.confirmedWindlevel === this.targetWindlevel) {
+      this.targetWindlevel = undefined;
+      return;
+    }
+    if (this.speedRetries >= 2) {
+      this.platform.log.warn(
+        '%s never confirmed speed %s (last reported %s), giving up',
+        this.accessory.displayName, this.targetWindlevel, this.confirmedWindlevel,
+      );
+      this.targetWindlevel = undefined;
+      return;
+    }
+    this.speedRetries++;
+    this.platform.log.info(
+      '%s did not apply speed %s (device reports %s), re-sending (attempt %s)',
+      this.accessory.displayName, this.targetWindlevel, this.confirmedWindlevel, this.speedRetries,
+    );
+    this.lastSpeedCommandTime = Date.now();
+    this.platform.webHelper.control(this.sn, {
+      [this.currState.powerCMD]: true,
+      windlevel: this.targetWindlevel,
+    });
+    this.speedVerifyTimer = setTimeout(() => this.verifySpeed(), 2000);
   }
 
   async getRotationSpeed() {
@@ -465,6 +561,7 @@ export class FanAccessory extends BaseAccessory {
     }
 
     if (state.windlevel !== undefined) {
+      this.confirmedWindlevel = state.windlevel.state;
       this.currState.speed =
         (state.windlevel.state * 100) / this.currState.maxSpeed;
       this.service
