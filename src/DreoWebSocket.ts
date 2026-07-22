@@ -85,6 +85,10 @@ export default class DreoWebSocket {
     }
   }
 
+  public get isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   public send(data: string) {
     if (this.ws?.readyState !== WebSocket.OPEN) {
       // Matches the old behaviour of dropping sends while disconnected, but says so out loud
