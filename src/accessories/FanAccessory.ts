@@ -45,11 +45,6 @@ export class FanAccessory extends BaseAccessory {
   private speedRetries = 0;
   private speedVerifyTimer?: ReturnType<typeof setTimeout>;
 
-  // Timer used to suppress the bare power-on command when HomeKit writes
-  // Active and RotationSpeed together (speed commands already include power-on)
-  private pendingPowerOnTimer?: ReturnType<typeof setTimeout>;
-  private lastSpeedCommandTime = 0;
-
   // Cached copy of latest fan states
   private currState = {
     on: false,
@@ -275,7 +270,9 @@ export class FanAccessory extends BaseAccessory {
         if (
           data.method === 'control-report' ||
           data.method === 'control-reply' ||
-          data.method === 'report'
+          data.method === 'report' ||
+          // Sent with a full state snapshot when the device rejoins the cloud
+          data.method === 'device-online'
         ) {
           Object.keys(data.reported).forEach((key) => {
             switch (key) {
@@ -424,31 +421,16 @@ export class FanAccessory extends BaseAccessory {
     this.platform.log.debug('Triggered SET Active:', value);
     const isActive = Boolean(value);
     this.currState.on = isActive;
-    if (this.pendingPowerOnTimer) {
-      clearTimeout(this.pendingPowerOnTimer);
-      this.pendingPowerOnTimer = undefined;
-    }
     if (!isActive) {
       // Cancel any in-flight speed verification so a retry can't turn the fan back on
       this.cancelSpeedVerification();
-      this.platform.webHelper.control(this.sn, {
-        [this.currState.powerCMD]: false,
-      });
-      return;
     }
     // When HomeKit turns the fan on at a speed (scenes, slider from off) it writes
-    // Active and RotationSpeed together. The speed command already includes power-on,
-    // and racing a bare power-on against it makes the device drop the speed change.
-    // Delay briefly and skip the bare power-on if a speed command covers it.
-    this.pendingPowerOnTimer = setTimeout(() => {
-      this.pendingPowerOnTimer = undefined;
-      if (Date.now() - this.lastSpeedCommandTime < 1000) {
-        return;
-      }
-      this.platform.webHelper.control(this.sn, {
-        [this.currState.powerCMD]: true,
-      });
-    }, 150);
+    // Active and RotationSpeed together; the command queue merges the two into a
+    // single power-on + windlevel message
+    this.platform.webHelper.control(this.sn, {
+      [this.currState.powerCMD]: isActive,
+    });
   }
 
   // Handle requests to get the current value of the "Active" characteristic
@@ -465,12 +447,6 @@ export class FanAccessory extends BaseAccessory {
       this.platform.log.debug('Setting fan speed:', converted);
       this.currState.on = true;
       this.currState.speed = value;
-      this.lastSpeedCommandTime = Date.now();
-      // This command supersedes any pending bare power-on
-      if (this.pendingPowerOnTimer) {
-        clearTimeout(this.pendingPowerOnTimer);
-        this.pendingPowerOnTimer = undefined;
-      }
       // Setting power state to true ensures the fan is actually on
       this.platform.webHelper.control(this.sn, {
         [this.currState.powerCMD]: true,
@@ -521,7 +497,6 @@ export class FanAccessory extends BaseAccessory {
       '%s did not apply speed %s (device reports %s), re-sending (attempt %s)',
       this.accessory.displayName, this.targetWindlevel, this.confirmedWindlevel, this.speedRetries,
     );
-    this.lastSpeedCommandTime = Date.now();
     this.platform.webHelper.control(this.sn, {
       [this.currState.powerCMD]: true,
       windlevel: this.targetWindlevel,

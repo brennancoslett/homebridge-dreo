@@ -223,6 +223,27 @@ export class DreoPlatform implements DynamicPlatformPlugin {
     }
   }
 
+  /**
+   * Pull authoritative state for one device from the HTTP API and push it to HomeKit.
+   * Called shortly after commands are sent: the WebSocket control-reply is only a
+   * server ack, so a command the device ignored would otherwise leave HomeKit showing
+   * a state the hardware never reached.
+   */
+  async reconcileDevice(sn: string) {
+    const handler = this.accessoryHandlers.find(accessoryHandler => accessoryHandler.sn === sn);
+    if (handler === undefined) {
+      return;
+    }
+    try {
+      const state = await this.webHelper.getState(sn);
+      if (state !== undefined) {
+        handler.updateState(state);
+      }
+    } catch (error) {
+      this.log.debug(`Failed to reconcile state for ${handler.accessory.displayName}:`, error);
+    }
+  }
+
   async refreshDeviceStates() {
     this.log.debug('Refreshing state of all accessories...');
     for (const handler of this.accessoryHandlers) {
