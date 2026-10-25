@@ -24,6 +24,9 @@ const DEFAULT_COMMAND_GROUP = 'device';
 // Window for merging characteristics HomeKit writes together into a single message
 const COMMAND_COALESCE_MS = 100;
 const MIN_COMMAND_GAP_MS = 750;
+// Delay after the last command before pulling authoritative state over HTTP, so
+// HomeKit gets corrected when the device ignored what we sent
+const RECONCILE_DELAY_MS = 5000;
 
 interface QueuedCommand {
   group: string;
@@ -37,17 +40,20 @@ export default class DreoAPI {
   private readonly email: string;
   private readonly password: string;
   private readonly log: Logger;
+  private readonly platform: DreoPlatform;
   private access_token: string;
   private ws!: DreoWebSocket;
   public server: string;
 
-  // Pending outgoing commands per device serial, plus the drain bookkeeping
+  // Pending outgoing commands per device serial, plus the drain/reconcile bookkeeping
   private readonly commandQueues = new Map<string, QueuedCommand[]>();
   private readonly draining = new Set<string>();
   private readonly lastCommandSent = new Map<string, number>();
+  private readonly reconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(platform: DreoPlatform) {
     this.log = platform.log;
+    this.platform = platform;
     this.email = platform.config.options?.email;
     this.password = platform.config.options?.password;
     this.server = 'us';
@@ -238,6 +244,7 @@ export default class DreoAPI {
     } finally {
       this.commandQueues.delete(sn);
       this.draining.delete(sn);
+      this.scheduleReconcile(sn);
     }
   }
 
@@ -248,5 +255,18 @@ export default class DreoAPI {
     while (!this.ws.isOpen && Date.now() < deadline) {
       await delay(200);
     }
+  }
+
+  // control-reply only means the server received the command, so pull real state from
+  // the HTTP API once things settle and let the device correct HomeKit
+  private scheduleReconcile(sn: string) {
+    const existing = this.reconcileTimers.get(sn);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    this.reconcileTimers.set(sn, setTimeout(() => {
+      this.reconcileTimers.delete(sn);
+      this.platform.reconcileDevice(sn);
+    }, RECONCILE_DELAY_MS));
   }
 }

@@ -540,4 +540,26 @@ export class HumidifierAccessory extends BaseAccessory {
         break;
     }
   }
+
+  updateState(state): void {
+    this.platform.log.debug('Updating state from API for %s', this.accessory.displayName);
+    if (!state) {
+      return;
+    }
+    const reported: DreoStateReport = {};
+    if (state.poweron !== undefined) reported.poweron = state.poweron.state;
+    if (state.mode !== undefined) reported.mode = state.mode.state;
+    if (state.suspend !== undefined) reported.suspend = state.suspend.state;
+    if (state.rh !== undefined) reported.rh = state.rh.state;
+    if (state.hotfogon !== undefined) reported.hotfogon = state.hotfogon.state;
+    if (state.foglevel !== undefined) reported.foglevel = state.foglevel.state;
+    if (state.rhautolevel !== undefined) reported.rhautolevel = state.rhautolevel.state;
+    if (state.rhsleeplevel !== undefined) reported.rhsleeplevel = state.rhsleeplevel.state;
+    if (state.ledlevel !== undefined) reported.ledlevel = state.ledlevel.state;
+    if (state.rgblevel !== undefined) reported.rgblevel = state.rgblevel.state;
+    if (state.muteon !== undefined) reported.muteon = state.muteon.state;
+    if (state.wrong !== undefined) reported.wrong = state.wrong.state;
+
+    Object.keys(reported).forEach(key => this.processReportedKey(key, reported));
+  }
 }

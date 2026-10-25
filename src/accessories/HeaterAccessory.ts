@@ -453,4 +453,75 @@ export class HeaterAccessory extends BaseAccessory {
     // Dreo expects temperature in Fahrenheit for some reason
     return Math.round((temperatureFromHomeKit * 9 / 5) + 32);
   }
+
+  updateState(state) {
+    this.platform.log.debug('Updating state from API for %s', this.accessory.displayName);
+    if (!state) {
+      return;
+    }
+
+    if (state.temperature !== undefined) {
+      this.temperature = this.convertToCelsius(state.temperature.state);
+      this.service.getCharacteristic(this.platform.Characteristic.CurrentTemperature)
+        .updateValue(this.temperature);
+    }
+    if (state.ecolevel !== undefined) {
+      this.targetTemperature = this.convertToCelsius(state.ecolevel.state);
+      this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
+        .updateValue(this.targetTemperature);
+    }
+    if (state.poweron !== undefined) {
+      this.on = state.poweron.state;
+      this.service.getCharacteristic(this.platform.Characteristic.Active)
+        .updateValue(this.on);
+    }
+    if (state.mode !== undefined) {
+      this.mode = state.mode.state;
+    }
+    if (state.htalevel !== undefined) {
+      this.heatLevel = state.htalevel.state;
+    }
+    if (state.childlockon !== undefined) {
+      this.childLockOn = state.childlockon.state;
+      this.service.getCharacteristic(this.platform.Characteristic.LockPhysicalControls)
+        .updateValue(this.childLockOn);
+    }
+    if (state.ptcon !== undefined) {
+      this.ptcon = state.ptcon.state;
+    }
+
+    // Update oscangle / swing
+    if (state.oscangle !== undefined) {
+      if (state.oscangle.state === 0) {
+        this.swing = true;
+        this.oscAngle = 0;
+      } else {
+        this.swing = false;
+        this.oscAngle = this.oscMap[state.oscangle.state];
+      }
+      if (this.canSetAngle) {
+        this.service.getCharacteristic(this.platform.Characteristic.RotationSpeed)
+          .updateValue(this.oscAngle);
+      }
+      if (this.canSwing) {
+        this.service.getCharacteristic(this.platform.Characteristic.SwingMode)
+          .updateValue(this.swing);
+      }
+    } else if (state.oscon !== undefined) {
+      this.swing = state.oscon.state;
+      if (this.canSwing) {
+        this.service.getCharacteristic(this.platform.Characteristic.SwingMode)
+          .updateValue(this.swing);
+      }
+    }
+
+    if (state.tempunit !== undefined && this.canSetTempUnit) {
+      this.tempUnit = state.tempunit.state === 1;
+      this.service.getCharacteristic(this.platform.Characteristic.TemperatureDisplayUnits)
+        .updateValue(this.tempUnit ? 1 : 0);
+    }
+
+    this.updateThermostatTemp();
+    this.updateHeaterState();
+  }
 }

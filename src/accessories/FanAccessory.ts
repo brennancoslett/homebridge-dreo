@@ -222,7 +222,9 @@ export class FanAccessory extends BaseAccessory {
         if (
           data.method === 'control-report' ||
           data.method === 'control-reply' ||
-          data.method === 'report'
+          data.method === 'report' ||
+          // Sent with a full state snapshot when the device rejoins the cloud
+          data.method === 'device-online'
         ) {
           Object.keys(data.reported).forEach((key) => {
             switch (key) {
@@ -458,5 +460,73 @@ export class FanAccessory extends BaseAccessory {
 
   getBrightness() {
     return this.currState.brightness;
+  }
+
+  updateState(state) {
+    this.platform.log.debug('Updating state from API for %s', this.accessory.displayName);
+    if (!state) {
+      return;
+    }
+
+    if (state.windlevel !== undefined) {
+      this.currState.speed =
+        (state.windlevel.state * 100) / this.currState.maxSpeed;
+      this.service
+        .getCharacteristic(this.platform.Characteristic.RotationSpeed)
+        .updateValue(this.currState.speed);
+    }
+    if (state.fanon !== undefined) {
+      this.currState.on = state.fanon.state;
+      this.service
+        .getCharacteristic(this.platform.Characteristic.Active)
+        .updateValue(this.currState.on);
+    } else if (state.poweron !== undefined) {
+      this.currState.on = state.poweron.state;
+      this.service
+        .getCharacteristic(this.platform.Characteristic.Active)
+        .updateValue(this.currState.on);
+    }
+    if (this.currState.swingCMD !== 'none' && state[this.currState.swingCMD] !== undefined) {
+      this.currState.swing = Boolean(state[this.currState.swingCMD]?.state ?? false);
+      this.service
+        .getCharacteristic(this.platform.Characteristic.SwingMode)
+        .updateValue(this.currState.swing);
+    }
+    if (state.mode !== undefined) {
+      this.currState.autoMode = this.convertModeToBoolean(state.mode.state);
+      this.service
+        .getCharacteristic(this.platform.Characteristic.TargetFanState)
+        .updateValue(this.currState.autoMode);
+    }
+    if (state.childlockon !== undefined) {
+      this.currState.lockPhysicalControls = Boolean(state.childlockon.state);
+      this.service
+        .getCharacteristic(this.platform.Characteristic.LockPhysicalControls)
+        .updateValue(this.currState.lockPhysicalControls);
+    }
+    const shouldHideTemperatureSensor =
+      this.platform.config.hideTemperatureSensor || false;
+    if (state.temperature !== undefined && !shouldHideTemperatureSensor) {
+      this.currState.temperature = this.correctedTemperature(
+        state.temperature.state,
+      );
+      if (this.temperatureService) {
+        this.temperatureService
+          .getCharacteristic(this.platform.Characteristic.CurrentTemperature)
+          .updateValue(this.currState.temperature);
+      }
+    }
+    if (state.lighton !== undefined && state.brightness !== undefined) {
+      this.currState.lightOn = state.lighton.state;
+      this.currState.brightness = state.brightness.state;
+      if (this.lightService) {
+        this.lightService
+          .getCharacteristic(this.platform.Characteristic.On)
+          .updateValue(this.currState.lightOn);
+        this.lightService
+          .getCharacteristic(this.platform.Characteristic.Brightness)
+          .updateValue(this.currState.brightness);
+      }
+    }
   }
 }
