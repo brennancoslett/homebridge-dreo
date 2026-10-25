@@ -4,6 +4,10 @@ Reliability work on Dreo fan control, plus reverse-direction support for DR-HCF
 ceiling fans. Commits are ordered so the reliability fixes sit below the ceiling-fan
 feature and can be upstreamed independently.
 
+Rebased onto upstream v5.0.0 (native `ws` client, `src/DreoWebSocket.ts`). The old
+keepalive-gating commit was dropped there: upstream's client only sends keepalives
+while connected.
+
 Supersedes `REVERSE_TOGGLE_IMPLEMENTATION.md`.
 
 ---
@@ -36,7 +40,7 @@ No exceptions in either direction.
 
 ## Commits
 
-### `b412d97` — Improve power control reliability and WebSocket reconnection state sync
+### `d97136e` — Improve power control reliability and WebSocket reconnection state sync
 
 - Removed the `if (currState.on !== value)` guards on explicit power (`Active`)
   commands across Fan, Heater, and Humidifier. The guard suppressed a real command
@@ -48,14 +52,7 @@ No exceptions in either direction.
 - Exposed the device serial and accessory handlers on the platform to support that
   refresh.
 
-### `4f69bf7` — Only send WebSocket keepalive while the socket is open
-
-The 15-second keepalive called `send('2')` unconditionally.
-`ReconnectingWebSocket` buffers sends made while disconnected, so a long outage
-queued up keepalives that all flushed at once on reconnect. Now gated on
-`readyState === OPEN`.
-
-### `5c6367c` — Fix fan speed being dropped during off-to-on transitions
+### `f62f004` — Fix fan speed being dropped during off-to-on transitions
 
 - Track `confirmedWindlevel` from `control-report` / `report` only, never from
   `control-reply`.
@@ -65,9 +62,9 @@ queued up keepalives that all flushed at once on reconnect. Now gated on
 
 Note the limit of this check: it compares windlevel only. A DR-HCF retains its
 windlevel while powered off, so a command that failed to apply *power* still looks
-confirmed. `f63e38a` covers that gap.
+confirmed. `78bdbb0` covers that gap.
 
-### `93cfabe` — Add reverse toggle support for ceiling fans
+### `b5a9b81` — Add reverse toggle support for ceiling fans
 
 On DR-HCF fans `mode` selects blade direction, not auto/manual:
 
@@ -89,12 +86,12 @@ On DR-HCF fans `mode` selects blade direction, not auto/manual:
   accompanying speed change.
 - Reverse state syncs from the Dreo app via WebSocket and survives restarts.
 
-### `ff26a04` — Add prepare script so git installs build dist automatically
+### `1b014fe` — Add prepare script so git installs build dist automatically
 
 `"prepare": "npm run build"` in `package.json`, so installing the plugin straight
 from the git branch produces a built `dist/`.
 
-### `f63e38a` — Pace outgoing commands so the device stops dropping concurrent writes
+### `78bdbb0` — Pace outgoing commands so the device stops dropping concurrent writes
 
 Root fix for failure mode 1.
 
@@ -109,8 +106,9 @@ straight to the socket:
 - Messages are spaced `MIN_COMMAND_GAP_MS` (750 ms) apart. The gap is measured
   against the device, not the current drain pass, so a command arriving just after a
   batch finishes is still spaced out.
-- `waitForOpenSocket()` holds sends until the socket is open, rather than letting
-  `ReconnectingWebSocket` buffer them and flush a burst carrying stale timestamps.
+- `waitForOpenSocket()` holds sends until the socket is open (via
+  `DreoWebSocket.isOpen`). Upstream's client drops sends made while disconnected, so
+  without this a command issued during a reconnect would be lost.
 
 **`src/platform.ts`** — `reconcileDevice(sn)` pulls authoritative state over the HTTP
 API 5 s after commands settle and pushes it into HomeKit. This is the safety net: it
@@ -151,7 +149,7 @@ On-device, three DR-HCF ceiling fans:
 - Scenes turning fans off/on with speeds: no redundant `mode:1` commands; when the
   device dropped a speed, the retry re-sent it and the fan self-corrected within ~3 s.
 - Reverse switch toggles blade direction and syncs from the Dreo app.
-- **2026-07-22, light + fan on together** — the case that motivated `f63e38a`:
+- **2026-07-22, light + fan on together** — the case that motivated `78bdbb0`:
 
   ```
   +   0ms  control-reply   {"brightness":100,"lighton":true}
