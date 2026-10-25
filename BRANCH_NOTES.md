@@ -165,26 +165,28 @@ On-device, three DR-HCF ceiling fans:
 ## Deployment
 
 ```bash
-npm run build
-rsync -az --delete dist/ hb:/var/lib/homebridge/node_modules/homebridge-dreo/dist/
-rsync -az package.json hb:/var/lib/homebridge/node_modules/homebridge-dreo/package.json
-ssh hb "sudo hb-service restart"
+scripts/deploy-pi.sh        # HB_HOST=192.168.1.247 if hostname resolution fails
 ```
 
-Use `192.168.1.247` in place of `hb` if hostname resolution fails.
+The script refuses to run while apt/dpkg is busy on the Pi or the homebridge package is
+half-configured, packs the plugin, installs the tarball with `npm install --save`, checks
+the installed `dist/` hash against the local build, restarts Homebridge and fails if any
+plugin or accessory was dropped.
 
-Confirm the running install matches the branch:
+Do **not** rsync `dist/` into `node_modules` any more. On 2026-10-25 an `apt upgrade` of
+the homebridge package left its module missing; the next restart had hb-service run
+`npm install --save homebridge@latest`, and because the storage `package.json` did not
+list homebridge-dreo, npm pruned it. Homebridge then removed the three ceiling fans as
+orphaned accessories and HomeKit put them back in the default room. Installing through
+npm records the plugin in `package.json`, so a reinstall rebuilds it instead.
 
-```bash
-# these two must print the same hash
-find dist -name '*.js' | sort | xargs shasum | shasum
-ssh hb "cd /var/lib/homebridge/node_modules/homebridge-dreo && \
-  find dist -name '*.js' | sort | xargs shasum | shasum"
+Pi-side settings that back this up:
 
-# and Homebridge must have started after the files landed
-ssh hb "stat -c '%y %n' /var/lib/homebridge/node_modules/homebridge-dreo/dist/DreoAPI.js; \
-  systemctl show homebridge --property=ActiveEnterTimestamp"
-```
+- `keepOrphans: true` in `/var/lib/homebridge/.uix-hb-service-homebridge-startup.json`
+  (also exposed in the Homebridge UI settings). If a plugin fails to load,
+  its accessories stay cached rather than being removed from HomeKit. Removed devices
+  then need deleting by hand from the UI's cached accessories page.
+- Never restart Homebridge while an apt upgrade is running.
 
 ---
 
